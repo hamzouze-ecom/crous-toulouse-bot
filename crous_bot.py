@@ -167,7 +167,9 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
     try:
         logger.info(f"Navigation vers la page de recherche Crous: {CROUS_SEARCH_URL}")
         await page.goto(CROUS_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(5000)
+        
+        # On attend 8 secondes pour être sûr que Svelte/l'API charge les résultats
+        await page.wait_for_timeout(8000)
 
         # Vérification d'expiration de session
         if has_cookies and await check_session_expired(page, bot, chat_id):
@@ -234,71 +236,21 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
                 logger.error(f"Erreur d'extraction d'une offre: {card_err}")
                 continue
 
-        # 2. Repli si aucun lien direct extrait
+        # 2. Debug Screenshot si 0 offre trouvée
         if not offres:
-            cards = await page.query_selector_all(".fr-card, article, .housing-item, .card, div[class*='card']")
-            logger.info(f"Repli : {len(cards)} cartes d'offres trouvées par sélecteur de carte.")
-            for card in cards:
-                try:
-                    link_elem = await card.query_selector("a.fr-card__link, a[href*='/offre/'], a")
-                    link_url = ""
-                    housing_id = ""
-                    if link_elem:
-                        href = await link_elem.get_attribute("href")
-                        if href:
-                            link_url = href if href.startswith("http") else f"https://trouverunlogement.lescrous.fr{href}"
-                            id_match = re.search(r"/(?:offre|logement)/([a-zA-Z0-9_-]+)", href)
-                            if id_match:
-                                housing_id = id_match.group(1)
-
-                    if not housing_id:
-                        data_id = await card.get_attribute("data-id") or await card.get_attribute("id")
-                        housing_id = data_id if data_id else str(hash(link_url))
-
-                    title_elem = await card.query_selector(".fr-card__title, .card-title, h3, h2, .title")
-                    title = (await title_elem.inner_text()).strip() if title_elem else "Résidence Crous Toulouse"
-
-                    detail_elem = await card.query_selector(".fr-card__detail, .card-subtitle, .detail, p")
-                    detail_text = (await detail_elem.inner_text()).strip() if detail_elem else ""
-
-                    type_logement = "Studio / Logement étudiant"
-                    surface = "N/C"
-                    type_match = re.search(r"(Studio|T1|T2|T3|Chambre|Colocation)", detail_text, re.IGNORECASE)
-                    if type_match:
-                        type_logement = type_match.group(1).capitalize()
-                    surface_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*m²", detail_text)
-                    if surface_match:
-                        surface = surface_match.group(1)
-
-                    price_elem = await card.query_selector(".fr-card__desc, .price, .loyer, span:has-text('€')")
-                    price_text = (await price_elem.inner_text()).strip() if price_elem else ""
-                    if not price_text:
-                        card_full_text = await card.inner_text()
-                        price_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*€", card_full_text)
-                        loyer = price_match.group(1) if price_match else "N/C"
-                    else:
-                        price_match = re.search(r"(\d+(?:[\.,]\d+)?)", price_text)
-                        loyer = price_match.group(1) if price_match else "N/C"
-
-                    img_elem = await card.query_selector("img")
-                    photo_url = DEFAULT_HOUSING_IMAGE
-                    if img_elem:
-                        src = await img_elem.get_attribute("src") or await img_elem.get_attribute("data-src")
-                        if src:
-                            photo_url = src if src.startswith("http") else f"https://trouverunlogement.lescrous.fr{src}"
-
-                    offres.append({
-                        "id": housing_id,
-                        "title": title,
-                        "type": type_logement,
-                        "surface": surface,
-                        "loyer": loyer,
-                        "photo": photo_url,
-                        "link": link_url or CROUS_SEARCH_URL
-                    })
-                except Exception as card_err:
-                    logger.error(f"Erreur d'extraction d'une carte: {card_err}")
-                    continue
+            logger.info("0 offre trouvée : Prise d'une capture d'écran pour le debug.")
+            screenshot_path = "debug_crous.png"
+            await page.screenshot(path=screenshot_path, full_page=True)
+            try:
+                with open(screenshot_path, "rb") as photo:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo,
+                        caption="⚠️ <b>0 logement trouvé par le bot.</b>\nVoici la capture d'écran de ce que le bot voit actuellement sur le serveur (vérification anti-bot ou page blanche).",
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                logger.error(f"Erreur lors de l'envoi du screenshot de debug : {e}")
 
     except Exception as e:
         logger.error(f"Erreur lors du scraping Crous: {e}")
