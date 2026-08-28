@@ -30,7 +30,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 CROUS_SEARCH_URL = os.getenv(
     "CROUS_SEARCH_URL",
-    "https://trouverunlogement.lescrous.fr/tools/47/search?bounds=1.3503_43.5327_1.5337_43.6687",
+    "https://trouverunlogement.lescrous.fr/tools/47/search?bounds=1.3503956_43.668708_1.5153795_43.532654&locationName=Toulouse",
 )
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
@@ -152,7 +152,7 @@ async def check_session_expired(page: Page, bot, chat_id: str) -> bool:
 async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
     """
     Scrape la liste des logements Crous disponibles à Toulouse.
-    Renoie une liste de dictionnaires contenant les détails des logements.
+    Renvoie une liste de dictionnaires contenant les détails des logements.
     """
     browser: Browser = await playwright.chromium.launch(headless=HEADLESS)
     context: BrowserContext = await browser.new_context(
@@ -165,18 +165,16 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
     offres = []
     try:
         logger.info(f"Navigation vers la page de recherche Crous: {CROUS_SEARCH_URL}")
-        await page.goto(CROUS_SEARCH_URL, wait_until="networkidle", timeout=30000)
+        await page.goto(CROUS_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(4000)
 
         # Vérification d'expiration de session
         if has_cookies and await check_session_expired(page, bot, chat_id):
             await browser.close()
             return []
 
-        # Attente du chargement des éléments d'annonces
-        await page.wait_for_selector(".fr-card, article, .housing-item, .card", timeout=15000)
-
         # Extraction des éléments de cartes de logement
-        cards = await page.query_selector_all(".fr-card, article, .housing-item, .card")
+        cards = await page.query_selector_all(".fr-card, article, .housing-item, .card, li.fr-col-12, div[class*='card']")
         logger.info(f"{len(cards)} cartes d'offres de logement trouvées.")
 
         for card in cards:
@@ -277,7 +275,7 @@ async def action_ajouter_aux_voeux(housing_id: str, housing_url: str) -> bool:
         page = await context.new_page()
         try:
             logger.info(f"Navigation vers le logement {housing_id} : {housing_url}")
-            await page.goto(housing_url, wait_until="networkidle", timeout=30000)
+            await page.goto(housing_url, wait_until="domcontentloaded", timeout=30000)
 
             # Vérification de session
             if "login" in page.url.lower() or "connexion" in page.url.lower():
@@ -525,5 +523,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
