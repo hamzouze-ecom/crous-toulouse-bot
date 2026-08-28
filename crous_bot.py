@@ -139,7 +139,7 @@ async def check_session_expired(page: Page, bot, chat_id: str) -> bool:
         msg = (
             "⚠️ <b>ALERTE SESSION CROUS EXPIRÉE !</b>\n\n"
             "Le script a été redirigé vers la page de connexion.\n"
-            "Veuillez mettre à jour la variable <code>CROUS_COOKIES_JSON</code> sur Render."
+            "Veuillez mettre à jour le fichier <code>cookies.json</code> avec votre nouvelle session."
         )
         try:
             await bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
@@ -165,7 +165,7 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
     offres = []
     try:
         logger.info(f"Navigation vers la page de recherche Crous: {CROUS_SEARCH_URL}")
-        await page.goto(CROUS_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(CROUS_SEARCH_URL, wait_until="networkidle", timeout=30000)
 
         # Vérification d'expiration de session
         if has_cookies and await check_session_expired(page, bot, chat_id):
@@ -173,10 +173,7 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
             return []
 
         # Attente du chargement des éléments d'annonces
-        try:
-            await page.wait_for_selector(".fr-card, article, .housing-item, .card", timeout=10000)
-        except Exception:
-            pass
+        await page.wait_for_selector(".fr-card, article, .housing-item, .card", timeout=15000)
 
         # Extraction des éléments de cartes de logement
         cards = await page.query_selector_all(".fr-card, article, .housing-item, .card")
@@ -273,14 +270,14 @@ async def action_ajouter_aux_voeux(housing_id: str, housing_url: str) -> bool:
 
         has_cookies = await load_cookies_into_context(context)
         if not has_cookies:
-            logger.error("Impossible d'ajouter aux vœux: cookies invalides ou inexistants.")
+            logger.error("Impossible d'ajouter aux vœux: cookies.json invalide ou inexistant.")
             await browser.close()
             return False
 
         page = await context.new_page()
         try:
             logger.info(f"Navigation vers le logement {housing_id} : {housing_url}")
-            await page.goto(housing_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(housing_url, wait_until="networkidle", timeout=30000)
 
             # Vérification de session
             if "login" in page.url.lower() or "connexion" in page.url.lower():
@@ -409,7 +406,7 @@ async def handle_callback_add_voeu(update: Update, context: ContextTypes.DEFAULT
             chat_id=query.message.chat_id,
             text=(
                 f"❌ <b>Échec lors de l'ajout aux vœux pour l'ID {housing_id}.</b>\n\n"
-                "Vérifiez que vos cookies sur Render sont toujours valides."
+                "Vérifiez que votre fichier <code>cookies.json</code> est toujours valide et actif."
             ),
             parse_mode="HTML",
             reply_to_message_id=query.message.message_id
@@ -417,44 +414,47 @@ async def handle_callback_add_voeu(update: Update, context: ContextTypes.DEFAULT
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande /start pour vérifier et enregistrer le Chat ID."""
+    """Commande /start pour vérifier, enregistrer et envoyer tous les logements actuellement disponibles."""
     global TELEGRAM_CHAT_ID
     chat_id = str(update.effective_chat.id)
     TELEGRAM_CHAT_ID = chat_id
 
     await update.message.reply_text(
-        f"🤖 <b>Bot Crous Toulouse d'automatisation démarré !</b>\n\n"
-        f"✅ Votre Chat ID est actif : <code>{chat_id}</code>\n"
-        f"⏱️ Période de vérification : toutes les {CHECK_INTERVAL} secondes.",
+        f"🤖 <b>Bot Crous Toulouse d'automatisation actif !</b>\n\n"
+        f"✅ Chat ID : <code>{chat_id}</code>\n"
+        f"🔎 <b>Recherche et envoi de tous les logements actuellement disponibles sur Telegram...</b>",
         parse_mode="HTML",
     )
+
+    # Force l'envoi de tous les logements actuellement disponibles sur le site Crous
+    asyncio.create_task(run_monitoring_cycle(context.bot, chat_id, force_notify_all=True))
 
 
 # ----------------------------------------------------
 # TÂCHE RÉCURRENTE DE MONITORING
 # ----------------------------------------------------
-async def run_monitoring_cycle(bot, chat_id: str):
-    """Exécute un cycle de scraping et notifie les nouveaux logements."""
+async def run_monitoring_cycle(bot, chat_id: str, force_notify_all: bool = False):
+    """Exécute un cycle de scraping et notifie les logements."""
     if not chat_id or chat_id == "YOUR_TELEGRAM_CHAT_ID_HERE":
         logger.warning("TELEGRAM_CHAT_ID non configuré. Envoyez /start à votre bot sur Telegram pour enregistrer votre Chat ID.")
         return
 
     logger.info("--- Démarrage du cycle de surveillance Crous Toulouse ---")
-    seen_ids = load_seen_logements()
+    seen_ids = set() if force_notify_all else load_seen_logements()
 
     async with async_playwright() as p:
         offres = await scrape_crous_toulouse(p, bot, chat_id)
 
     nouveaux_compteur = 0
     for housing in offres:
-        if housing['id'] not in seen_ids:
-            logger.info(f"Nouveau logement détecté : {housing['title']} (ID: {housing['id']})")
+        if force_notify_all or housing['id'] not in seen_ids:
+            logger.info(f"Notification logement : {housing['title']} (ID: {housing['id']})")
             await send_housing_notification(bot, chat_id, housing)
             save_seen_logement(housing['id'])
             seen_ids.add(housing['id'])
             nouveaux_compteur += 1
 
-    logger.info(f"Cycle terminé : {nouveaux_compteur} nouveau(x) logement(s) notifié(s).")
+    logger.info(f"Cycle terminé : {nouveaux_compteur} logement(s) notifié(s).")
 
 
 async def scheduled_monitoring_job(context: ContextTypes.DEFAULT_TYPE):
@@ -525,4 +525,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
