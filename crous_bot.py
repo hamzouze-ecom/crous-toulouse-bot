@@ -10,7 +10,7 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
-    CommandStartHandler,
+    CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
 )
@@ -139,7 +139,7 @@ async def check_session_expired(page: Page, bot, chat_id: str) -> bool:
         msg = (
             "⚠️ <b>ALERTE SESSION CROUS EXPIRÉE !</b>\n\n"
             "Le script a été redirigé vers la page de connexion.\n"
-            "Veuillez mettre à jour le fichier <code>cookies.json</code> avec votre nouvelle session."
+            "Veuillez mettre à jour la variable <code>CROUS_COOKIES_JSON</code> sur Render."
         )
         try:
             await bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
@@ -165,7 +165,7 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
     offres = []
     try:
         logger.info(f"Navigation vers la page de recherche Crous: {CROUS_SEARCH_URL}")
-        await page.goto(CROUS_SEARCH_URL, wait_until="networkidle", timeout=30000)
+        await page.goto(CROUS_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
 
         # Vérification d'expiration de session
         if has_cookies and await check_session_expired(page, bot, chat_id):
@@ -173,7 +173,10 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
             return []
 
         # Attente du chargement des éléments d'annonces
-        await page.wait_for_selector(".fr-card, article, .housing-item, .card", timeout=15000)
+        try:
+            await page.wait_for_selector(".fr-card, article, .housing-item, .card", timeout=10000)
+        except Exception:
+            pass
 
         # Extraction des éléments de cartes de logement
         cards = await page.query_selector_all(".fr-card, article, .housing-item, .card")
@@ -270,14 +273,14 @@ async def action_ajouter_aux_voeux(housing_id: str, housing_url: str) -> bool:
 
         has_cookies = await load_cookies_into_context(context)
         if not has_cookies:
-            logger.error("Impossible d'ajouter aux vœux: cookies.json invalide ou inexistant.")
+            logger.error("Impossible d'ajouter aux vœux: cookies invalides ou inexistants.")
             await browser.close()
             return False
 
         page = await context.new_page()
         try:
             logger.info(f"Navigation vers le logement {housing_id} : {housing_url}")
-            await page.goto(housing_url, wait_until="networkidle", timeout=30000)
+            await page.goto(housing_url, wait_until="domcontentloaded", timeout=30000)
 
             # Vérification de session
             if "login" in page.url.lower() or "connexion" in page.url.lower():
@@ -406,7 +409,7 @@ async def handle_callback_add_voeu(update: Update, context: ContextTypes.DEFAULT
             chat_id=query.message.chat_id,
             text=(
                 f"❌ <b>Échec lors de l'ajout aux vœux pour l'ID {housing_id}.</b>\n\n"
-                "Vérifiez que votre fichier <code>cookies.json</code> est toujours valide et actif."
+                "Vérifiez que vos cookies sur Render sont toujours valides."
             ),
             parse_mode="HTML",
             reply_to_message_id=query.message.message_id
@@ -419,30 +422,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     TELEGRAM_CHAT_ID = chat_id
 
-    # Sauvegarde automatique dans .env si besoin
-    try:
-        env_path = ".env"
-        if os.path.exists(env_path):
-            with open(env_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            new_lines = []
-            found = False
-            for line in lines:
-                if line.startswith("TELEGRAM_CHAT_ID="):
-                    new_lines.append(f"TELEGRAM_CHAT_ID={chat_id}\n")
-                    found = True
-                else:
-                    new_lines.append(line)
-            if not found:
-                new_lines.append(f"TELEGRAM_CHAT_ID={chat_id}\n")
-            with open(env_path, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-    except Exception as e:
-        logger.error(f"Impossible d'enregistrer TELEGRAM_CHAT_ID dans .env: {e}")
-
     await update.message.reply_text(
         f"🤖 <b>Bot Crous Toulouse d'automatisation démarré !</b>\n\n"
-        f"✅ Votre Chat ID a été configuré : <code>{chat_id}</code>\n"
+        f"✅ Votre Chat ID est actif : <code>{chat_id}</code>\n"
         f"⏱️ Période de vérification : toutes les {CHECK_INTERVAL} secondes.",
         parse_mode="HTML",
     )
@@ -528,7 +510,7 @@ def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Handlers
-    application.add_handler(CommandStartHandler(), start_command)
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(handle_callback_add_voeu, pattern="^add_voeu:"))
 
     # Planification du Job de surveillance
@@ -543,5 +525,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+```
 
