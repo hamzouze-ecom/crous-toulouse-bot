@@ -156,7 +156,8 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
     """
     browser: Browser = await playwright.chromium.launch(headless=HEADLESS)
     context: BrowserContext = await browser.new_context(
-        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport={"width": 1280, "height": 800}
     )
 
     has_cookies = await load_cookies_into_context(context)
@@ -166,70 +167,53 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
     try:
         logger.info(f"Navigation vers la page de recherche Crous: {CROUS_SEARCH_URL}")
         await page.goto(CROUS_SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(4000)
+        await page.wait_for_timeout(5000)
 
         # Vérification d'expiration de session
         if has_cookies and await check_session_expired(page, bot, chat_id):
             await browser.close()
             return []
 
-        # Extraction des éléments de cartes de logement
-        cards = await page.query_selector_all(".fr-card, article, .housing-item, .card, li.fr-col-12, div[class*='card']")
-        logger.info(f"{len(cards)} cartes d'offres de logement trouvées.")
+        # 1. Extraction directe via les liens d'offres /offre/
+        offer_links = await page.query_selector_all("a[href*='/offre/']")
+        logger.info(f"{len(offer_links)} liens d'offres directs trouvés.")
 
-        for card in cards:
+        seen_ids_in_page = set()
+
+        for link in offer_links:
             try:
-                # 1. ID et Lien Direct
-                link_elem = await card.query_selector("a.fr-card__link, a[href*='/offre/'], a[href*='/logement/'], a")
-                link_url = ""
-                housing_id = ""
+                href = await link.get_attribute("href") or ""
+                id_match = re.search(r"/offre/([a-zA-Z0-9_-]+)", href)
+                if not id_match:
+                    continue
+                housing_id = id_match.group(1)
+                if housing_id in seen_ids_in_page:
+                    continue
+                seen_ids_in_page.add(housing_id)
 
-                if link_elem:
-                    href = await link_elem.get_attribute("href")
-                    if href:
-                        link_url = href if href.startswith("http") else f"https://trouverunlogement.lescrous.fr{href}"
-                        # Extraction de l'ID depuis l'URL (ex: /offre/123456)
-                        id_match = re.search(r"/(?:offre|logement)/([a-zA-Z0-9_-]+)", href)
-                        if id_match:
-                            housing_id = id_match.group(1)
+                link_url = href if href.startswith("http") else f"https://trouverunlogement.lescrous.fr{href}"
 
-                if not housing_id:
-                    # Alternative ID depuis l'attribut data-id
-                    data_id = await card.get_attribute("data-id") or await card.get_attribute("id")
-                    housing_id = data_id if data_id else str(hash(link_url))
+                # Recherche de l'élément conteneur parent
+                card = await link.evaluate_handle("el => el.closest('article, .fr-card, .card, li, div') || el")
+                card_text = await card.evaluate("el => el.innerText || ''")
 
-                # 2. Nom de la Résidence / Titre
-                title_elem = await card.query_selector(".fr-card__title, .card-title, h3, h2, .title")
-                title = (await title_elem.inner_text()).strip() if title_elem else "Résidence Crous Toulouse"
+                # Titre / Résidence
+                title_match = re.search(r"(Résidence\s+[^|\n]+)", card_text, re.IGNORECASE)
+                title = title_match.group(1).strip() if title_match else "Résidence Crous Toulouse"
 
-                # 3. Type de logement & Surface
-                detail_elem = await card.query_selector(".fr-card__detail, .card-subtitle, .detail, p")
-                detail_text = (await detail_elem.inner_text()).strip() if detail_elem else ""
+                # Type
+                type_match = re.search(r"(Studio|T1|T2|T3|Chambre|Colocation)", card_text, re.IGNORECASE)
+                type_logement = type_match.group(1).capitalize() if type_match else "Studio / Logement étudiant"
 
-                # Regex pour isoler le type et la surface (ex: Studio - 18 m²)
-                type_logement = "Studio / Logement étudiant"
-                surface = "N/C"
+                # Surface
+                surface_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*m²", card_text)
+                surface = surface_match.group(1) if surface_match else "N/C"
 
-                type_match = re.search(r"(Studio|T1|T2|T3|Chambre|Colocation)", detail_text, re.IGNORECASE)
-                if type_match:
-                    type_logement = type_match.group(1).capitalize()
+                # Loyer
+                price_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*€", card_text)
+                loyer = price_match.group(1) if price_match else "N/C"
 
-                surface_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*m²", detail_text)
-                if surface_match:
-                    surface = surface_match.group(1)
-
-                # 4. Loyer mensuel (€)
-                price_elem = await card.query_selector(".fr-card__desc, .price, .loyer, span:has-text('€')")
-                price_text = (await price_elem.inner_text()).strip() if price_elem else ""
-                if not price_text:
-                    card_full_text = await card.inner_text()
-                    price_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*€", card_full_text)
-                    loyer = price_match.group(1) if price_match else "N/C"
-                else:
-                    price_match = re.search(r"(\d+(?:[\.,]\d+)?)", price_text)
-                    loyer = price_match.group(1) if price_match else "N/C"
-
-                # 5. Image Principale
+                # Image
                 img_elem = await card.query_selector("img")
                 photo_url = DEFAULT_HOUSING_IMAGE
                 if img_elem:
@@ -244,11 +228,77 @@ async def scrape_crous_toulouse(playwright, bot, chat_id: str) -> List[Dict]:
                     "surface": surface,
                     "loyer": loyer,
                     "photo": photo_url,
-                    "link": link_url or CROUS_SEARCH_URL
+                    "link": link_url
                 })
             except Exception as card_err:
-                logger.error(f"Erreur d'extraction d'une carte d'offre: {card_err}")
+                logger.error(f"Erreur d'extraction d'une offre: {card_err}")
                 continue
+
+        # 2. Repli si aucun lien direct extrait
+        if not offres:
+            cards = await page.query_selector_all(".fr-card, article, .housing-item, .card, div[class*='card']")
+            logger.info(f"Repli : {len(cards)} cartes d'offres trouvées par sélecteur de carte.")
+            for card in cards:
+                try:
+                    link_elem = await card.query_selector("a.fr-card__link, a[href*='/offre/'], a")
+                    link_url = ""
+                    housing_id = ""
+                    if link_elem:
+                        href = await link_elem.get_attribute("href")
+                        if href:
+                            link_url = href if href.startswith("http") else f"https://trouverunlogement.lescrous.fr{href}"
+                            id_match = re.search(r"/(?:offre|logement)/([a-zA-Z0-9_-]+)", href)
+                            if id_match:
+                                housing_id = id_match.group(1)
+
+                    if not housing_id:
+                        data_id = await card.get_attribute("data-id") or await card.get_attribute("id")
+                        housing_id = data_id if data_id else str(hash(link_url))
+
+                    title_elem = await card.query_selector(".fr-card__title, .card-title, h3, h2, .title")
+                    title = (await title_elem.inner_text()).strip() if title_elem else "Résidence Crous Toulouse"
+
+                    detail_elem = await card.query_selector(".fr-card__detail, .card-subtitle, .detail, p")
+                    detail_text = (await detail_elem.inner_text()).strip() if detail_elem else ""
+
+                    type_logement = "Studio / Logement étudiant"
+                    surface = "N/C"
+                    type_match = re.search(r"(Studio|T1|T2|T3|Chambre|Colocation)", detail_text, re.IGNORECASE)
+                    if type_match:
+                        type_logement = type_match.group(1).capitalize()
+                    surface_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*m²", detail_text)
+                    if surface_match:
+                        surface = surface_match.group(1)
+
+                    price_elem = await card.query_selector(".fr-card__desc, .price, .loyer, span:has-text('€')")
+                    price_text = (await price_elem.inner_text()).strip() if price_elem else ""
+                    if not price_text:
+                        card_full_text = await card.inner_text()
+                        price_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*€", card_full_text)
+                        loyer = price_match.group(1) if price_match else "N/C"
+                    else:
+                        price_match = re.search(r"(\d+(?:[\.,]\d+)?)", price_text)
+                        loyer = price_match.group(1) if price_match else "N/C"
+
+                    img_elem = await card.query_selector("img")
+                    photo_url = DEFAULT_HOUSING_IMAGE
+                    if img_elem:
+                        src = await img_elem.get_attribute("src") or await img_elem.get_attribute("data-src")
+                        if src:
+                            photo_url = src if src.startswith("http") else f"https://trouverunlogement.lescrous.fr{src}"
+
+                    offres.append({
+                        "id": housing_id,
+                        "title": title,
+                        "type": type_logement,
+                        "surface": surface,
+                        "loyer": loyer,
+                        "photo": photo_url,
+                        "link": link_url or CROUS_SEARCH_URL
+                    })
+                except Exception as card_err:
+                    logger.error(f"Erreur d'extraction d'une carte: {card_err}")
+                    continue
 
     except Exception as e:
         logger.error(f"Erreur lors du scraping Crous: {e}")
@@ -523,4 +573,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
